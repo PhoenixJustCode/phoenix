@@ -91,6 +91,27 @@ body {
 }
 
 .card .social-links a:hover {
-    color: #007bff;
+    color: #0088cc;
     transform: rotateY(360deg);
 }
+
+
+.card .social-links .color-at:hover {
+    color: #D44638;
+}
+
+.card .social-links .color-git:hover {
+    color :#000000
+}
+
+
+.card .social-links .color-inst:hover {
+    background: linear-gradient(45deg, #fbad50, #cd486b, #8a3ab9);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+
+.card .social-links .color-youtube:hover {
+    color: #FF0000;
+}   

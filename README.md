@@ -5,7 +5,10 @@
 ## О проекте
 
 Визиточный сайт **Phoenix** – это простая и стильная веб-страница, представляющая личную информацию, контакты и ссылки на социальные сети.
-![image](https://github.com/user-attachments/assets/dab03c59-7e95-439e-a4f0-ced4272ebac3)
+
+![изображение](https://github.com/user-attachments/assets/4f5ea45d-7a44-44ee-99c2-5e0ebd7f60c4)
+
+
 
 
 ## Функционал

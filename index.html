@@ -1,48 +1,85 @@
 <!DOCTYPE html>
 <html lang="en">
-<head> 
-    <meta charset="utf-8"> 
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" href="icon.png">
-    <meta name="theme-color" content="#000000">
-    <meta name="description" content="Demchenko Alexandr's personal website">
-    <title>Demchenko Alexandr</title>
-  
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="icon.png" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="Demchenko Alexandr's personal website" />
+    <title>Alexandr Demchenko</title>
+
     <!-- Open Graph / Telegram / Facebook -->
-    <meta property="og:title" content="Demchenko Alexandr">
-    <meta property="og:description" content="Demchenko Alexandr's personal website">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://phoenixjustcode.ru">
+    <meta property="og:title" content="Alexandr Demchenko" />
+    <meta
+      property="og:description"
+      content="Demchenko Alexandr's personal website"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://phoenixjustcode.ru" />
 
-
-    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.1.1/css/bootstrap.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
-    <link rel="stylesheet" href="style/style.css">
-
+    <link
+      rel="stylesheet"
+      href="https://maxcdn.bootstrapcdn.com/bootstrap/4.1.1/css/bootstrap.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css"
+    />
+    <link rel="stylesheet" href="style/style.css" />
     <script src="js/main.js"></script>
-</head>
-<body>
+  </head>
+  <body>
     <div class="card">
-        <div class="box">
-            <div class="img">
-                <img src="img.jpg" alt="Demchenko Alexandr">
-            </div>
-            <div class="name">
-                <h2>Demchenko Alexandr</h2>
-                <h3>Software Engineer</h3>
-            </div>
-                
-            <div class="social-links">
-                <a class="color-at" href="mailto:alexandersd3306@gmail.com" title="E-mail"><i class="fa fa-at"></i></a>
-                <a class="color-git" href="https://github.com/PhoenixJustCode" title="GitHub"><i class="fa fa-github"></i></a>
-                <a   class="color-link" href="https://www.linkedin.com/in/phoenixjustcode/" title="LinkedIn"><i class="fa fa-linkedin"></i></a>
-            </div>
-            <div class="social-links">
-                <a  class="color-tme" href="https://t.me/phoenix_S_E" title="Telegram"><i class="fa fa-telegram"></i></a>
-                <a  class="color-inst" href="https://www.instagram.com/demchenkoss_/" title="Instagram"><i class="fa fa-instagram"></i></a>
-                <a   class="color-youtube"href="https://www.youtube.com/@phoenixjustcode" title="Youtube"><i class="fa fa-youtube"></i></a>
-            </div>
+      <div class="box">
+        <div class="img">
+          <img src="img.jpg" alt="Alexandr Demchenko" />
         </div>
+        <div class="name">
+          <h2>Alexandr Demchenko</h2>
+          <h3>Software Engineer</h3>
+        </div>
+
+        <div class="social-links">
+          <a
+            class="color-at"
+            href="mailto:alexandersd3306@gmail.com"
+            title="E-mail"
+            ><i class="fa fa-at"></i
+          ></a>
+          <a
+            class="color-git"
+            href="https://github.com/PhoenixJustCode"
+            title="GitHub"
+            ><i class="fa fa-github"></i
+          ></a>
+          <a
+            class="color-link"
+            href="https://www.linkedin.com/in/phoenixjustcode/"
+            title="LinkedIn"
+            ><i class="fa fa-linkedin"></i
+          ></a>
+        </div>
+        <div class="social-links">
+          <a class="color-tme" href="https://t.me/phoenix_S_E" title="Telegram"
+            ><i class="fa fa-telegram"></i
+          ></a>
+          <a
+            class="color-inst"
+            href="https://www.instagram.com/demchenkoss_/"
+            title="Instagram"
+            ><i class="fa fa-instagram"></i
+          ></a>
+          <a
+            class="color-youtube"
+            href="https://www.youtube.com/@phoenixjustcode"
+            title="Youtube"
+            ><i class="fa fa-youtube"></i
+          ></a>
+        </div>
+      </div>
     </div>
-</body>
+    <script>
+      fetch("/track", { method: "POST" });
+    </script>
+  </body>
 </html>

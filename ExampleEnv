@@ -1,0 +1,5 @@
+DB_HOST=localhost
+DB_PORT=8000
+DB_NAME_DB=phoenix_data
+DB_USER=postgres
+DB_PASSWORD=postgres

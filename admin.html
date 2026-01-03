@@ -367,7 +367,16 @@
         try {
           const response = await fetch(url);
           if (!response.ok) {
-            if (response.status === 401) window.location.href = "/track";
+            if (response.status === 401) {
+              // Avoid infinite loop if we are already at /track
+              if (window.location.pathname === "/track") {
+                console.log(
+                  "Session invalid, but already at /track. Logic error in backend serve."
+                );
+              } else {
+                window.location.href = "/track";
+              }
+            }
             throw new Error("Fetch failed");
           }
           const data = await response.json();

@@ -85,6 +85,13 @@ func main() {
 		log.Fatal("Failed to create tables:", err)
 	}
 
+	// Check if any admin exists
+	var adminCount int
+	_ = db.QueryRow("SELECT COUNT(*) FROM admins").Scan(&adminCount)
+	if adminCount == 0 {
+		log.Println("WARNING: No admin users found in database! Use '-create-admin -user ... -pass ...' to create one.")
+	}
+
 	if *createAdmin {
 		if *adminPass == "" {
 			log.Fatal("Please provide a password using -pass")
@@ -105,7 +112,7 @@ func main() {
 	http.HandleFunc("/api/visits", apiVisitsHandler)
 
 	fs := http.FileServer(http.Dir("."))
-	http.Handle("/", fs)
+	http.Handle("/", safeStaticServer(fs))
 
 	srvPort := os.Getenv("PORT")
 	if srvPort == "" {
@@ -293,16 +300,33 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+		log.Printf("Login Decode Error: %v", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
+	log.Printf("Login attempt for user: %s", creds.Username)
+
 	var dbHash string
 	err := db.QueryRow("SELECT password_hash FROM admins WHERE username = $1", creds.Username).Scan(&dbHash)
-	if err != nil || dbHash != hashPassword(creds.Password) {
+	if err != nil {
+		if err == sql.ErrNoRows {
+			log.Printf("Login Failed: User '%s' not found in database", creds.Username)
+		} else {
+			log.Printf("Login DB Error: %v", err)
+		}
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+
+	inputHash := hashPassword(creds.Password)
+	if dbHash != inputHash {
+		log.Printf("Login Failed: Incorrect password for user '%s'", creds.Username)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	log.Printf("Login Successful: %s", creds.Username)
 
 	token := hex.EncodeToString([]byte(fmt.Sprintf("%d%s", time.Now().UnixNano(), creds.Username)))
 	expires := time.Now().Add(24 * time.Hour)
@@ -346,9 +370,28 @@ func checkSession(r *http.Request) bool {
 		return false
 	}
 
-	var exists bool
-	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM sessions WHERE token = $1 AND expires_at > NOW())", cookie.Value).Scan(&exists)
-	return err == nil && exists
+	var expiresAt time.Time
+	err = db.QueryRow("SELECT expires_at FROM sessions WHERE token = $1", cookie.Value).Scan(&expiresAt)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("Session DB Error: %v", err)
+		}
+		return false
+	}
+
+	return expiresAt.After(time.Now())
+}
+
+// Custom handler to protect sensitive files
+func safeStaticServer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block direct access to admin.html and login.html
+		if r.URL.Path == "/admin.html" || r.URL.Path == "/login.html" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func apiVisitsHandler(w http.ResponseWriter, r *http.Request) {

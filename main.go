@@ -229,11 +229,12 @@ func getGeo(ip string) (string, string) {
 
 func trackHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		// Record visit even when accessing the dashboard path
 		go recordVisit(r)
-
-		// Serve admin page if logged in, otherwise login page
-		if checkSession(r) {
+		_, err := r.Cookie("session_token")
+		log.Printf("GET /track - Cookie presence: %v", err == nil)
+		loggedIn := checkSession(r)
+		log.Printf("GET /track - LoggedIn: %v", loggedIn)
+		if loggedIn {
 			http.ServeFile(w, r, "admin.html")
 		} else {
 			http.ServeFile(w, r, "login.html")
@@ -333,6 +334,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	_, err = db.Exec("INSERT INTO sessions (token, username, expires_at) VALUES ($1, $2, $3)", token, creds.Username, expires)
 	if err != nil {
+		log.Printf("Session DB Insert Error: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -340,7 +342,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "session_token",
 		Value:    token,
-		Expires:  expires,
+		MaxAge:   86400, // 24 hours
 		HttpOnly: true,
 		Path:     "/",
 	})

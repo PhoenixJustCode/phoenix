@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -17,6 +21,15 @@ import (
 type GeoResponse struct {
 	Country string `json:"country_name"`
 	City    string `json:"city"`
+}
+
+type Visit struct {
+	ID        int       `json:"id"`
+	IP        string    `json:"ip"`
+	Country   string    `json:"country"`
+	City      string    `json:"city"`
+	UA        string    `json:"user_agent"`
+	VisitedAt time.Time `json:"visited_at"`
 }
 
 var db *sql.DB
@@ -29,14 +42,12 @@ func init() {
 }
 
 func main() {
-	// 1. Собираем параметры из env
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	dbname := os.Getenv("DB_NAME_DB")
 
-	// Если параметры из env есть, пробуем создать базу, если её нет
 	if host != "" && dbname != "" {
 		err := ensureDatabaseExists(host, port, user, pass, dbname)
 		if err != nil {
@@ -44,7 +55,6 @@ func main() {
 		}
 	}
 
-	// 2. Формируем строку подключения
 	envConnStr := os.Getenv("DATABASE_URL")
 	if envConnStr == "" && host != "" {
 		envConnStr = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
@@ -52,8 +62,10 @@ func main() {
 		)
 	}
 
-	// 3. Флаг позволяет переопределить настройки
 	connStr := flag.String("db", envConnStr, "Database connection string")
+	createAdmin := flag.Bool("create-admin", false, "Create an admin user and exit")
+	adminUser := flag.String("user", "admin", "Admin username")
+	adminPass := flag.String("pass", "", "Admin password")
 	flag.Parse()
 
 	finalConnStr := *connStr
@@ -68,18 +80,30 @@ func main() {
 	}
 	defer db.Close()
 
-	// 4. Создаем таблицу при запуске, если её нет
-	err = createTable()
+	err = createTables()
 	if err != nil {
-		log.Fatal("Failed to create table:", err)
+		log.Fatal("Failed to create tables:", err)
 	}
 
-	// 5. Обработчики
-	// Эндпоинт для трекинга (вызывается из JS в index.html)
-	http.HandleFunc("/track", trackHandler)
+	if *createAdmin {
+		if *adminPass == "" {
+			log.Fatal("Please provide a password using -pass")
+		}
+		hash := hashPassword(*adminPass)
+		_, err = db.Exec("INSERT INTO admins (username, password_hash) VALUES ($1, $2) ON CONFLICT (username) DO UPDATE SET password_hash = $2", *adminUser, hash)
+		if err != nil {
+			log.Fatal("Failed to create admin:", err)
+		}
+		log.Printf("Admin user '%s' created/updated successfully.", *adminUser)
+		return
+	}
 
-	// Раздача статики (все файлы в текущей папке: index.html, img.jpg, style/, js/)
-	// Важно: FileServer должен быть последним, так как он "съедает" все пути
+	// Handlers
+	http.HandleFunc("/track", trackHandler)
+	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/logout", logoutHandler)
+	http.HandleFunc("/api/visits", apiVisitsHandler)
+
 	fs := http.FileServer(http.Dir("."))
 	http.Handle("/", fs)
 
@@ -93,7 +117,6 @@ func main() {
 }
 
 func ensureDatabaseExists(host, port, user, pass, dbname string) error {
-	// Подключаемся к системной базе postgres, чтобы создать нашу базу
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=postgres sslmode=disable",
 		host, port, user, pass)
 
@@ -121,22 +144,38 @@ func ensureDatabaseExists(host, port, user, pass, dbname string) error {
 	return nil
 }
 
-func createTable() error {
-	query := `
-	CREATE TABLE IF NOT EXISTS visits (
-		id SERIAL PRIMARY KEY,
-		ip VARCHAR(45),
-		country TEXT,
-		city TEXT,
-		user_agent TEXT,
-		visited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);`
-	_, err := db.Exec(query)
-	return err
+func createTables() error {
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS visits (
+			id SERIAL PRIMARY KEY,
+			ip VARCHAR(45),
+			country TEXT,
+			city TEXT,
+			user_agent TEXT,
+			visited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS admins (
+			id SERIAL PRIMARY KEY,
+			username TEXT UNIQUE NOT NULL,
+			password_hash TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			token TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			expires_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_visits_visited_at ON visits(visited_at DESC);`,
+	}
+
+	for _, q := range queries {
+		if _, err := db.Exec(q); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func getIP(r *http.Request) string {
-	// 4️⃣ Получаем реальный IP
 	ip := r.Header.Get("X-Forwarded-For")
 	if ip != "" {
 		return ip
@@ -147,32 +186,32 @@ func getIP(r *http.Request) string {
 }
 
 func getGeo(ip string) (string, string) {
-	// Если мы на локальном хосте, GeoIP API не сможет найти адрес.
-	// Для тестов подставим какой-нибудь известный IP (например, 8.8.8.8 - Google).
 	isLocal := ip == "127.0.0.1" || ip == "::1" || ip == ""
 	lookupIP := ip
 	if isLocal {
-		log.Printf("Local IP detected (%s). Using fallback 8.8.8.8 for testing GeoIP...", ip)
 		lookupIP = "8.8.8.8"
 	}
 
-	// 5️⃣ GeoIP (ipapi.co)
 	resp, err := http.Get(fmt.Sprintf("https://ipapi.co/%s/json/", lookupIP))
 	if err != nil {
-		log.Printf("GeoIP Request Error: %v", err)
 		return "Unknown", "Unknown"
 	}
 	defer resp.Body.Close()
 
 	var geo GeoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&geo); err != nil {
-		log.Printf("GeoIP Decode Error: %v", err)
 		return "Unknown", "Unknown"
 	}
 
-	// Если это был локальный IP, пометим это
 	country := geo.Country
+	if country == "" {
+		country = "Unknown"
+	}
 	city := geo.City
+	if city == "" {
+		city = "Unknown"
+	}
+
 	if isLocal {
 		country = "[Local] " + country
 		city = "[Local] " + city
@@ -182,15 +221,33 @@ func getGeo(ip string) (string, string) {
 }
 
 func trackHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		// Record visit even when accessing the dashboard path
+		go recordVisit(r)
+
+		// Serve admin page if logged in, otherwise login page
+		if checkSession(r) {
+			http.ServeFile(w, r, "admin.html")
+		} else {
+			http.ServeFile(w, r, "login.html")
+		}
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
+	recordVisit(r)
+	w.WriteHeader(http.StatusOK)
+}
+
+func recordVisit(r *http.Request) {
 	ip := getIP(r)
 	ua := r.UserAgent()
 
-	// 7️⃣ Защита от спама (интервал 50 минут)
+	// Spam protection (50 minutes)
 	var exists bool
 	err := db.QueryRow(`
 		SELECT EXISTS(
@@ -199,30 +256,158 @@ func trackHandler(w http.ResponseWriter, r *http.Request) {
 		)
 	`, ip).Scan(&exists)
 
-	if err != nil {
-		log.Println("DB Check Error:", err)
-	}
-
-	if exists {
+	if err == nil && exists {
 		log.Printf("Skip tracking for IP %s (already tracked in last 50m)", ip)
-		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
 	country, city := getGeo(ip)
 
-	// 6️⃣ Сохраняем в БД
 	_, err = db.Exec(`
 		INSERT INTO visits (ip, country, city, user_agent)
 		VALUES ($1, $2, $3, $4)
 	`, ip, country, city, ua)
 
 	if err != nil {
-		log.Println("DB Insert Error:", err)
-		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("DB Insert Error for IP %s: %v", ip, err)
 		return
 	}
 
 	log.Printf("Tracked visit: %s (%s, %s)", ip, city, country)
+}
+
+func hashPassword(password string) string {
+	hash := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(hash[:])
+}
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var creds struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	var dbHash string
+	err := db.QueryRow("SELECT password_hash FROM admins WHERE username = $1", creds.Username).Scan(&dbHash)
+	if err != nil || dbHash != hashPassword(creds.Password) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	token := hex.EncodeToString([]byte(fmt.Sprintf("%d%s", time.Now().UnixNano(), creds.Username)))
+	expires := time.Now().Add(24 * time.Hour)
+
+	_, err = db.Exec("INSERT INTO sessions (token, username, expires_at) VALUES ($1, $2, $3)", token, creds.Username, expires)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    token,
+		Expires:  expires,
+		HttpOnly: true,
+		Path:     "/",
+	})
+
 	w.WriteHeader(http.StatusOK)
+}
+
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("session_token")
+	if err == nil {
+		_, _ = db.Exec("DELETE FROM sessions WHERE token = $1", cookie.Value)
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    "",
+		Expires:  time.Now().Add(-1 * time.Hour),
+		HttpOnly: true,
+		Path:     "/",
+	})
+	http.Redirect(w, r, "/track", http.StatusSeeOther)
+}
+
+func checkSession(r *http.Request) bool {
+	cookie, err := r.Cookie("session_token")
+	if err != nil {
+		return false
+	}
+
+	var exists bool
+	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM sessions WHERE token = $1 AND expires_at > NOW())", cookie.Value).Scan(&exists)
+	return err == nil && exists
+}
+
+func apiVisitsHandler(w http.ResponseWriter, r *http.Request) {
+	if !checkSession(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	limitStr := r.URL.Query().Get("limit")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit <= 0 {
+		limit = 10
+	}
+
+	offsetStr := r.URL.Query().Get("offset")
+	offset, _ := strconv.Atoi(offsetStr)
+
+	search := r.URL.Query().Get("search")
+
+	query := `SELECT id, ip, country, city, user_agent, visited_at FROM visits`
+	args := []interface{}{}
+	if search != "" {
+		query += ` WHERE ip ILIKE $1 OR country ILIKE $1 OR city ILIKE $1`
+		args = append(args, "%"+search+"%")
+		query += ` ORDER BY visited_at DESC LIMIT $2 OFFSET $3`
+		args = append(args, limit, offset)
+	} else {
+		query += ` ORDER BY visited_at DESC LIMIT $1 OFFSET $2`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var visits []Visit
+	for rows.Next() {
+		var v Visit
+		if err := rows.Scan(&v.ID, &v.IP, &v.Country, &v.City, &v.UA, &v.VisitedAt); err != nil {
+			continue
+		}
+		visits = append(visits, v)
+	}
+
+	var total int
+	countQuery := "SELECT COUNT(*) FROM visits"
+	if search != "" {
+		_ = db.QueryRow(countQuery+" WHERE ip ILIKE $1 OR country ILIKE $1 OR city ILIKE $1", "%"+search+"%").Scan(&total)
+	} else {
+		_ = db.QueryRow(countQuery).Scan(&total)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"visits": visits,
+		"total":  total,
+		"my_ip":  getIP(r),
+	})
 }

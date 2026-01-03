@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Вход | Dashboard</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --primary: #00f2fe;
+        --secondary: #4facfe;
+        --bg: #0f172a;
+        --card-bg: rgba(30, 41, 59, 0.7);
+        --text: #f8fafc;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: "Roboto", sans-serif;
+        background: radial-gradient(circle at top right, #001f3f, #000);
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        color: var(--text);
+      }
+
+      .login-container {
+        position: relative;
+        z-index: 10;
+      }
+
+      .login-card {
+        background: var(--card-bg);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 3rem;
+        border-radius: 20px;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        width: 380px;
+        text-align: center;
+        animation: fadeIn 0.8s ease-out;
+      }
+
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      h1 {
+        font-family: "Orbitron", sans-serif;
+        font-size: 2rem;
+        margin-bottom: 2rem;
+        background: linear-gradient(to right, var(--primary), var(--secondary));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        letter-spacing: 2px;
+      }
+
+      .input-group {
+        margin-bottom: 1.5rem;
+        text-align: left;
+      }
+
+      label {
+        display: block;
+        font-size: 0.875rem;
+        color: #94a3b8;
+        margin-bottom: 0.5rem;
+      }
+
+      input {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        background: rgba(15, 23, 42, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        color: white;
+        font-size: 1rem;
+        transition: all 0.3s ease;
+        box-sizing: border-box;
+      }
+
+      input:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 2px rgba(0, 242, 254, 0.2);
+      }
+
+      button {
+        width: 100%;
+        padding: 0.875rem;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        border: none;
+        border-radius: 10px;
+        color: #000;
+        font-weight: 700;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: transform 0.2s, box-shadow 0.2s;
+        margin-top: 1rem;
+        font-family: "Orbitron", sans-serif;
+      }
+
+      button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 242, 254, 0.4);
+      }
+
+      button:active {
+        transform: translateY(0);
+      }
+
+      .error-msg {
+        color: #ef4444;
+        font-size: 0.875rem;
+        margin-top: 1rem;
+        display: none;
+      }
+
+      /* Ambient background circles */
+      .circle {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(80px);
+        z-index: 1;
+      }
+
+      .circle-1 {
+        width: 400px;
+        height: 400px;
+        background: rgba(0, 242, 254, 0.15);
+        top: -100px;
+        right: -100px;
+      }
+
+      .circle-2 {
+        width: 300px;
+        height: 300px;
+        background: rgba(79, 172, 254, 0.1);
+        bottom: -50px;
+        left: -50px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="circle circle-1"></div>
+    <div class="circle circle-2"></div>
+
+    <div class="login-container">
+      <div class="login-card">
+        <h1>PHOENIX</h1>
+        <form id="loginForm">
+          <div class="input-group">
+            <label>Username</label>
+            <input type="text" id="username" required autocomplete="username" />
+          </div>
+          <div class="input-group">
+            <label>Password</label>
+            <input
+              type="password"
+              id="password"
+              required
+              autocomplete="current-password"
+            />
+          </div>
+          <button type="submit">ENTER</button>
+          <div id="error" class="error-msg">Неверный логин или пароль</div>
+        </form>
+      </div>
+    </div>
+
+    <script>
+      document
+        .getElementById("loginForm")
+        .addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const btn = e.target.querySelector("button");
+          const error = document.getElementById("error");
+
+          btn.disabled = true;
+          btn.innerText = "WAITING...";
+          error.style.display = "none";
+
+          const payload = {
+            username: document.getElementById("username").value,
+            password: document.getElementById("password").value,
+          };
+
+          try {
+            const resp = await fetch("/login", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+
+            if (resp.ok) {
+              window.location.href = "/track";
+            } else {
+              error.style.display = "block";
+              btn.disabled = false;
+              btn.innerText = "ENTER";
+            }
+          } catch (err) {
+            console.error(err);
+            error.innerText = "Ошибка сервера";
+            error.style.display = "block";
+            btn.disabled = false;
+            btn.innerText = "ENTER";
+          }
+        });
+    </script>
+  </body>
+</html>

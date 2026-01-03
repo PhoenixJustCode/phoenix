@@ -207,7 +207,8 @@
             });
 
             if (resp.ok) {
-              window.location.href = "/track";
+              // Force refresh by adding a timestamp
+              window.location.href = "/track?t=" + new Date().getTime();
             } else {
               error.style.display = "block";
               btn.disabled = false;

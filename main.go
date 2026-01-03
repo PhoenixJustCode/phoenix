@@ -199,14 +199,22 @@ func getGeo(ip string) (string, string) {
 		lookupIP = "8.8.8.8"
 	}
 
-	resp, err := http.Get(fmt.Sprintf("https://ipapi.co/%s/json/", lookupIP))
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("https://ipapi.co/%s/json/", lookupIP))
 	if err != nil {
+		log.Printf("GeoIP Network Error for %s: %v", lookupIP, err)
 		return "Unknown", "Unknown"
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("GeoIP API Error for %s: Status %d", lookupIP, resp.StatusCode)
+		return "Rate Limited", "Unknown"
+	}
+
 	var geo GeoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&geo); err != nil {
+		log.Printf("GeoIP JSON Error for %s: %v", lookupIP, err)
 		return "Unknown", "Unknown"
 	}
 
@@ -229,6 +237,11 @@ func getGeo(ip string) (string, string) {
 
 func trackHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		// Prevent caching so the browser doesn't show the login page after successful login
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+
 		go recordVisit(r)
 		_, err := r.Cookie("session_token")
 		log.Printf("GET /track - Cookie presence: %v", err == nil)

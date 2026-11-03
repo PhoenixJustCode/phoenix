@@ -409,20 +409,27 @@
           return;
         }
 
+        // visit fields come from anonymous visitors, so they go in as text, never as HTML
+        const cell = (tag, text, attrs) => {
+          const el = document.createElement(tag);
+          el.textContent = text;
+          Object.entries(attrs || {}).forEach(([k, val]) => el.setAttribute(k, val));
+          return el;
+        };
+
         visits.forEach((v) => {
           const row = document.createElement("tr");
           const date = new Date(v.visited_at).toLocaleString("ru-RU");
 
-          row.innerHTML = `
-                    <td style="white-space: nowrap;">${date}</td>
-                    <td><code style="color: var(--primary);">${v.ip}</code></td>
-                    <td>
-                        <span class="badge badge-geo">${v.city}, ${v.country}</span>
-                    </td>
-                    <td>
-                        <div class="ua-text" title="${v.user_agent}">${v.user_agent}</div>
-                    </td>
-                `;
+          const dateTd = cell("td", date, { style: "white-space: nowrap;" });
+          const ipTd = document.createElement("td");
+          ipTd.appendChild(cell("code", v.ip, { style: "color: var(--primary);" }));
+          const geoTd = document.createElement("td");
+          geoTd.appendChild(cell("span", `${v.city}, ${v.country}`, { class: "badge badge-geo" }));
+          const uaTd = document.createElement("td");
+          uaTd.appendChild(cell("div", v.user_agent, { class: "ua-text", title: v.user_agent }));
+
+          row.append(dateTd, ipTd, geoTd, uaTd);
           tbody.appendChild(row);
         });
       }

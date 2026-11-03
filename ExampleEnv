@@ -1,6 +1,2 @@
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME_DB=phoenix_data
-DB_USER=postgres
-DB_PASSWORD=postgres
-
+DATABASE_URL=postgres://phoenix_app:change-me@127.0.0.1:5432/phoenix_data?sslmode=disable
+LISTEN_ADDR=127.0.0.1:8000

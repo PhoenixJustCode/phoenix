@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - load
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+  settings:
+    gosec:
+      excludes:
+        # G104 duplicates errcheck
+        - G104
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

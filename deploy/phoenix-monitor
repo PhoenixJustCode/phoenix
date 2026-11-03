@@ -18,6 +18,7 @@ readonly CERT_MIN_DAYS=14
 readonly BACKUP_MAX_AGE_H=26
 readonly HTTP_TIMEOUT=15
 readonly GEO_TIMEOUT=5
+readonly SSH_ALERT_INTERVAL=300
 readonly TOP_N=3
 
 now() { TZ=Asia/Almaty date '+%d.%m.%Y %H:%M'; }
@@ -180,17 +181,55 @@ geo() {
     paste -sd ',' - | sed 's/,/, /g'
 }
 
+ssh_state_file() { echo "${STATE_DIR}/ssh_login_${1//[^a-zA-Z0-9._@-]/_}"; }
+
+# at most one message per user@ip per interval; logins in between are counted into the next one
+notify_ssh_login() {
+  local key=$1 count=$2 method=$3 file last=0 pending=0 now_s
+  file=$(ssh_state_file "$key")
+  [[ -f $file ]] && read -r last pending _ <"$file"
+  now_s=$(date +%s)
+  pending=$((pending + count))
+  if ((now_s - last < SSH_ALERT_INTERVAL)); then
+    echo "$last $pending $key" >"$file"
+    return
+  fi
+  send "[ВХОД SSH] ${DOMAIN}, $(now)"$'\n'"${key%@*} с ${key#*@} (${method}), входов: ${pending}"$'\n'"$(geo "${key#*@}")"
+  echo "$now_s 0 $key" >"$file"
+}
+
+# sends the counted logins whose quiet interval has passed without a new login
+flush_ssh_logins() {
+  local file last pending key now_s
+  now_s=$(date +%s)
+  for file in "${STATE_DIR}"/ssh_login_*; do
+    [[ -f $file ]] || continue
+    read -r last pending key <"$file"
+    if ((pending > 0 && now_s - last >= SSH_ALERT_INTERVAL)); then
+      send "[ВХОД SSH] ${DOMAIN}, $(now)"$'\n'"${key%@*} с ${key#*@}: ещё ${pending} входов за последние $((SSH_ALERT_INTERVAL / 60)) мин"
+      echo "$now_s 0 $key" >"$file"
+    fi
+  done
+}
+
 check_ssh_logins() {
-  local cursor="${STATE_DIR}/ssh.cursor" method user ip
+  local cursor="${STATE_DIR}/ssh.cursor" method user ip key
+  local -A counts=() methods=()
   # first run: start from the journal end, so old logins are not reported
   if [[ ! -f $cursor ]]; then
     journalctl -u ssh -n 1 -q --no-pager --show-cursor | sed -n 's/^-- cursor: //p' >"$cursor"
     return
   fi
   while read -r method user ip; do
-    send "[ВХОД SSH] ${DOMAIN}, $(now)"$'\n'"${user} с ${ip} (${method})"$'\n'"$(geo "$ip")"
+    key="${user}@${ip}"
+    counts[$key]=$((${counts[$key]:-0} + 1))
+    methods[$key]=$method
   done < <(journalctl -u ssh -q --no-pager -o cat --cursor-file="$cursor" |
     grep -oP 'Accepted \K\S+ for \S+ from \S+' | awk '{print $1, $3, $5}')
+  for key in "${!counts[@]}"; do
+    notify_ssh_login "$key" "${counts[$key]}" "${methods[$key]}"
+  done
+  flush_ssh_logins
 }
 
 run_checks() {

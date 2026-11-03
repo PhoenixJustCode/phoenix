@@ -72,7 +72,8 @@ version_at() {
 
 crashed() {
   [[ $(systemctl show phoenix -p NRestarts --value) -gt 0 ||
-    $(systemctl show phoenix -p ActiveState --value) == failed ]]
+    $(systemctl show phoenix -p ActiveState --value) == failed ||
+    $(systemctl show phoenix -p SubState --value) == auto-restart ]]
 }
 
 serves_version() {

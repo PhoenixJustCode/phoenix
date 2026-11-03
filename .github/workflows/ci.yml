@@ -1,0 +1,179 @@
+name: CI/CD
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  GO_VERSION: "1.27.3"
+  GOLANGCI_LINT_VERSION: v2.15.0
+  GOVULNCHECK_VERSION: v1.9.0
+  MIN_COVERAGE: "90"
+  TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+
+jobs:
+  test:
+    name: Lint, test, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-ed: $unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags load ./loadtest
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+      - name: Vulnerabilities
+        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+
+      - name: Test
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Coverage
+        run: |
+          grep -v '/internal/testdb/' coverage.out > coverage.filtered
+          total=$(go tool cover -func=coverage.filtered | awk '/^total:/ { sub("%", "", $3); print $3 }')
+          echo "total coverage: ${total}%"
+          if awk -v t="$total" -v min="$MIN_COVERAGE" 'BEGIN { exit !(t + 0 < min) }'; then
+            echo "coverage ${total}% is below ${MIN_COVERAGE}%"
+            exit 1
+          fi
+
+      - name: Load test
+        run: go test -tags load -count=1 -v ./loadtest
+        env:
+          LOAD_DURATION: 10s
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -trimpath -o /dev/null .
+
+  deploy:
+    name: Deploy
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    outputs:
+      code: ${{ steps.deploy.outputs.code }}
+    env:
+      HOST: 95.215.56.82
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # no build cache here: a poisoned cache from another branch must not reach prod
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Build release
+        id: build
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X main.version=${SHA}" -o dist/phoenix .
+          echo "sum=$(sha256sum dist/phoenix | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf 'Host prod\n  HostName %s\n  User deploy\n  IdentityFile ~/.ssh/deploy_key\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n  ConnectTimeout 15\n' \
+            "$HOST" > ~/.ssh/config
+
+      # the server key only accepts these two commands, see deploy/phoenix-ssh-gate
+      - name: Upload
+        run: |
+          # shellcheck disable=SC2029 # SHA is expanded locally on purpose
+          ssh prod "upload ${SHA}" < dist/phoenix
+
+      - name: Deploy and verify
+        id: deploy
+        env:
+          SUM: ${{ steps.build.outputs.sum }}
+        run: |
+          set +e
+          # shellcheck disable=SC2029 # SHA and SUM are expanded locally on purpose
+          ssh prod "deploy ${SHA} ${SUM}"
+          code=$?
+          echo "code=${code}" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+  notify:
+    name: Notify failure
+    needs: [test, deploy]
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CODE: ${{ needs.deploy.outputs.code }}
+          TEST_RESULT: ${{ needs.test.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "$TEST_RESULT" != "success" ]; then
+            msg="CI упал, деплой не запускался"
+          else
+            case "$CODE" in
+              1) msg="новая версия не прошла healthcheck, выполнен откат, сайт работает" ;;
+              2) msg="КРИТИЧНО: деплой и откат не удались, сайт может быть недоступен" ;;
+              *) msg="деплой прерван до переключения, прод не тронут" ;;
+            esac
+          fi
+          curl -sS --max-time 15 -o /dev/null \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=[DEPLOY] phoenixjustcode.ru ${SHA::7}: ${msg}
+          ${RUN_URL}"

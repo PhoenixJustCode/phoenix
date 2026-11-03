@@ -1,0 +1,46 @@
+[Unit]
+Description=phoenixjustcode.ru web app
+After=network-online.target postgresql.service
+Wants=network-online.target
+# at most 5 crash restarts in 5 minutes, then stay failed so the monitor alerts instead of looping
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=phoenix
+Group=phoenix
+EnvironmentFile=/etc/phoenix/env
+ExecStart=/opt/phoenix/current/phoenix
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+MemoryHigh=200M
+MemoryMax=256M
+UMask=0077
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

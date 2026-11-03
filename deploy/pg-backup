@@ -1,0 +1,50 @@
+#!/bin/bash
+# daily dump of all databases plus a real restore of phoenix_data into a scratch database
+set -euo pipefail
+
+readonly DIR=/root/backups
+readonly KEEP_DAYS=6
+readonly DB=phoenix_data
+readonly APP_ROLE=phoenix_app
+readonly CHECK_DB=phoenix_restore_check
+readonly TABLES=(visits admins sessions)
+readonly ENV_FILE=/etc/phoenix/env
+DATE=$(date +%F)
+readonly DATE
+
+# the app role owns the data; reading it as superuser would run app-controlled code as superuser
+DATABASE_URL=$(sed -n 's/^DATABASE_URL=//p' "$ENV_FILE")
+# password goes via env, argv is visible to every user in ps
+PGPASSWORD=$(sed -E 's#^postgres://[^:]+:([^@]+)@.*#\1#' <<<"$DATABASE_URL")
+export PGPASSWORD
+LIVE_URL=$(sed -E 's#^(postgres://[^:]+):[^@]+@#\1@#' <<<"$DATABASE_URL")
+readonly LIVE_URL
+readonly CHECK_URL=${LIVE_URL/\/${DB}\?//${CHECK_DB}?}
+
+pg() { runuser -u postgres -- "$@"; }
+count() { psql "$1" -Atc "SELECT count(*) FROM public.$2"; }
+
+mkdir -p "$DIR"
+pg pg_dumpall | gzip >"${DIR}/.pg-${DATE}.sql.gz.part"
+mv "${DIR}/.pg-${DATE}.sql.gz.part" "${DIR}/pg-${DATE}.sql.gz"
+pg pg_dump -Fc "$DB" >"${DIR}/.${DB}-${DATE}.dump.part"
+mv "${DIR}/.${DB}-${DATE}.dump.part" "${DIR}/${DB}-${DATE}.dump"
+
+# restore test, every statement runs as the unprivileged app role
+pg dropdb --if-exists "$CHECK_DB"
+pg createdb -O "$APP_ROLE" "$CHECK_DB"
+trap 'pg dropdb --if-exists "$CHECK_DB"' EXIT
+pg_restore --no-owner --exit-on-error -d "$CHECK_URL" <"${DIR}/${DB}-${DATE}.dump"
+
+for t in "${TABLES[@]}"; do
+  restored=$(count "$CHECK_URL" "$t")
+  live=$(count "$LIVE_URL" "$t")
+  # live rows can only grow after the dump, sessions may expire
+  if [[ $t != sessions ]] && ((restored == 0 || restored > live)); then
+    echo "restore check failed for $t: restored=$restored live=$live" >&2
+    exit 1
+  fi
+  echo "restore check $t: restored=$restored live=$live"
+done
+
+find "$DIR" \( -name 'pg-*.sql.gz' -o -name "${DB}-*.dump" \) -mtime +"$KEEP_DAYS" -delete

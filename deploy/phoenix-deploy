@@ -1,0 +1,125 @@
+#!/bin/bash
+# deploys a CI release with auto rollback; exit 0 ok, 1 rolled back, 2 rollback failed, 3 prod untouched
+set -euo pipefail
+
+readonly SHA=${1:-}
+readonly WANT_SUM=${2:-}
+readonly ROOT=/opt/phoenix
+readonly CURRENT=${ROOT}/current
+readonly KEEP_RELEASES=5
+readonly LOCAL_URL=http://127.0.0.1:8000
+readonly SITE_URL=https://phoenixjustcode.ru
+readonly HEALTH_ATTEMPTS=30
+readonly CURL_TIMEOUT=5
+readonly DB_NAME=phoenix_data
+readonly BACKUP_DIR=/var/backups/phoenix
+readonly KEEP_BACKUPS=10
+readonly UPLOADER=deploy
+
+log() { echo "[phoenix-deploy] $*"; }
+abort() { log "$1"; exit 3; }
+
+[[ $SHA =~ ^[0-9a-f]{40}$ ]] || abort "invalid commit sha"
+[[ $WANT_SUM =~ ^[0-9a-f]{64}$ ]] || abort "invalid sha256"
+readonly INCOMING=${ROOT}/incoming/${SHA}
+readonly RELEASE=${ROOT}/releases/${SHA}
+
+exec 9>/run/phoenix-deploy.lock
+flock -n 9 || abort "another deploy is running"
+
+sum_of() { sha256sum "$1" | cut -d' ' -f1; }
+
+install_release() {
+  # read with the uploader's rights, so a planted symlink can't expose root-only files
+  tmp=$(mktemp -d "${ROOT}/releases/.new-XXXXXX")
+  trap 'rm -rf "$tmp"' EXIT
+  runuser -u "$UPLOADER" -- cat -- "${INCOMING}/phoenix" >"${tmp}/phoenix" ||
+    abort "release not uploaded"
+  runuser -u "$UPLOADER" -- rm -rf -- "$INCOMING"
+  [[ $(sum_of "${tmp}/phoenix") == "$WANT_SUM" ]] || abort "checksum mismatch"
+  chmod 755 "$tmp" "${tmp}/phoenix"
+  mv -T "$tmp" "$RELEASE"
+  trap - EXIT
+}
+
+# a re-run of the same commit reuses its release
+if [[ -d $RELEASE ]]; then
+  [[ $(sum_of "${RELEASE}/phoenix") == "$WANT_SUM" ]] || abort "existing release has another checksum"
+  runuser -u "$UPLOADER" -- rm -rf -- "$INCOMING"
+else
+  install_release
+fi
+
+# verified db backup, the app applies migrations on start
+backup=${BACKUP_DIR}/predeploy-$(date +%Y%m%d-%H%M%S)-${SHA:0:7}.dump
+runuser -u postgres -- pg_dump -Fc "$DB_NAME" >"$backup" || abort "db backup failed"
+pg_restore --list "$backup" | grep -q "TABLE DATA" || abort "db backup is empty"
+log "db backup ok: $backup ($(du -h "$backup" | cut -f1))"
+find "$BACKUP_DIR" -name 'predeploy-*.dump' -printf '%T@ %p\n' | sort -rn |
+  tail -n +$((KEEP_BACKUPS + 1)) | cut -d' ' -f2- | xargs -r rm -f
+
+switch_to() {
+  ln -sfn "$1" "${CURRENT}.tmp"
+  mv -Tf "${CURRENT}.tmp" "$CURRENT"
+  # deploys and rollbacks must not eat the crash restart budget of the unit
+  systemctl reset-failed phoenix 2>/dev/null || true
+  systemctl restart phoenix
+}
+
+version_at() {
+  curl -fsS -m "$CURL_TIMEOUT" "$1/healthz" 2>/dev/null | jq -r .version 2>/dev/null
+}
+
+serves_version() {
+  local i
+  for ((i = 0; i < HEALTH_ATTEMPTS; i++)); do
+    if [[ $(version_at "$LOCAL_URL") == "$SHA" && $(version_at "$SITE_URL") == "$SHA" ]] &&
+      curl -fsS -m "$CURL_TIMEOUT" -o /dev/null "${SITE_URL}/" &&
+      curl -fsS -m "$CURL_TIMEOUT" -o /dev/null "${LOCAL_URL}/readyz"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+site_up() {
+  local i
+  for ((i = 0; i < HEALTH_ATTEMPTS; i++)); do
+    curl -fsS -m "$CURL_TIMEOUT" -o /dev/null "${SITE_URL}/" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+prune_releases() {
+  local keep_current keep_previous
+  keep_current=$(readlink -f "$CURRENT")
+  keep_previous=$1
+  find "${ROOT}/releases" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' |
+    sort -rn | cut -d' ' -f2- |
+    grep -vxF -e "$keep_current" -e "$keep_previous" |
+    tail -n +$((KEEP_RELEASES - 1)) | xargs -r rm -rf
+}
+
+previous=$(readlink -f "$CURRENT")
+log "switching $(basename "$previous") -> ${SHA:0:7}"
+switch_to "$RELEASE"
+
+if serves_version; then
+  prune_releases "$previous"
+  log "deployed ${SHA:0:7}, releases kept: $(find "${ROOT}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+  exit 0
+fi
+
+log "health check failed, last app logs:"
+journalctl -u phoenix -n 20 --no-pager -o cat || true
+log "rolling back to $(basename "$previous")"
+switch_to "$previous"
+[[ $RELEASE == "$previous" ]] || rm -rf "$RELEASE"
+if site_up; then
+  log "rolled back, site is up on $(basename "$previous")"
+  exit 1
+fi
+log "rollback failed, site is down"
+exit 2

@@ -1,0 +1,276 @@
+#!/bin/bash
+# server health checks with telegram notifications; modes: check | report | test
+set -uo pipefail
+
+source /etc/phoenix-monitor/env
+
+readonly STATE_DIR=/var/lib/phoenix-monitor
+readonly DOMAIN=phoenixjustcode.ru
+readonly SERVICES=(phoenix nginx postgresql@16-main)
+readonly DB_NAME=phoenix_data
+readonly CERT_FILE=/etc/letsencrypt/live/${DOMAIN}/cert.pem
+readonly BACKUP_DIR=/root/backups
+readonly DISK_LIMIT_PCT=85
+readonly MEM_MIN_AVAIL_MB=150
+# 1 vCPU: sustained 15-min load above this means something is eating the CPU
+readonly LOAD_LIMIT=2
+readonly CERT_MIN_DAYS=14
+readonly BACKUP_MAX_AGE_H=26
+readonly HTTP_TIMEOUT=15
+readonly GEO_TIMEOUT=5
+readonly TOP_N=3
+
+now() { TZ=Asia/Almaty date '+%d.%m.%Y %H:%M'; }
+
+send() {
+  curl -s --max-time "$HTTP_TIMEOUT" -o /dev/null --fail \
+    "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${CHAT_ID}" \
+    --data-urlencode "text=$1" ||
+    logger -t phoenix-monitor "failed to send telegram message"
+}
+
+# alert only when a check changes state, so a long outage is one message, not hundreds
+track() {
+  local name=$1 status=$2 msg=$3 file="${STATE_DIR}/${1}.state" prev
+  prev=$(cat "$file" 2>/dev/null || echo ok)
+  [[ $status == "$prev" ]] && return
+  echo "$status" >"$file"
+  if [[ $status == fail ]]; then
+    send "[ПРОБЛЕМА] ${DOMAIN}, $(now)"$'\n'"${msg}"
+  else
+    send "[ВОССТАНОВЛЕНО] ${DOMAIN}, $(now)"$'\n'"${name}: снова в норме"
+  fi
+}
+
+site_code() {
+  curl -s -o /dev/null -w '%{http_code}' --max-time "$HTTP_TIMEOUT" \
+    --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/"
+}
+
+disk_pct() { df --output=pcent / | tail -1 | tr -dc '0-9'; }
+mem_avail_mb() { awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo; }
+load15() { awk '{print $3}' /proc/loadavg; }
+top_cpu() { ps -eo pcpu,comm --sort=-pcpu --no-headers | head -"$TOP_N"; }
+top_mem() { ps -eo rss,comm --sort=-rss --no-headers | head -"$TOP_N" | awk '{printf "%dM %s\n", $1/1024, $2}'; }
+
+cert_days() {
+  local end
+  end=$(openssl x509 -enddate -noout -in "$CERT_FILE" | cut -d= -f2)
+  echo $(( ($(date -d "$end" +%s) - $(date +%s)) / 86400 ))
+}
+
+latest_backup() { ls -t "${BACKUP_DIR}"/pg-*.sql.gz 2>/dev/null | head -1; }
+
+check_services() {
+  local s
+  for s in "${SERVICES[@]}"; do
+    if systemctl is-active --quiet "$s"; then
+      track "$s" ok ""
+    else
+      track "$s" fail "Сервис ${s} не работает: $(systemctl is-active "$s")"
+    fi
+  done
+}
+
+check_db() {
+  if pg_isready -q -h 127.0.0.1 -p 5432 -d "$DB_NAME" -t 10; then
+    track db ok ""
+  else
+    track db fail "БД ${DB_NAME} не принимает подключения"
+  fi
+}
+
+check_site() {
+  local code
+  code=$(site_code)
+  if [[ $code == 200 ]]; then
+    track site ok ""
+  else
+    track site fail "Сайт https://${DOMAIN} отвечает кодом ${code}"
+  fi
+}
+
+check_resources() {
+  local disk mem load
+  disk=$(disk_pct)
+  if (( disk < DISK_LIMIT_PCT )); then
+    track disk ok ""
+  else
+    track disk fail "Диск заполнен на ${disk}%"
+  fi
+
+  mem=$(mem_avail_mb)
+  if (( mem >= MEM_MIN_AVAIL_MB )); then
+    track memory ok ""
+  else
+    track memory fail "Мало памяти: доступно ${mem} МБ"$'\n'"Топ по памяти:"$'\n'"$(top_mem)"
+  fi
+
+  load=$(load15)
+  if awk -v l="$load" -v max="$LOAD_LIMIT" 'BEGIN{exit !(l < max)}'; then
+    track load ok ""
+  else
+    track load fail "Высокая нагрузка CPU, load15=${load}"$'\n'"Топ по CPU:"$'\n'"$(top_cpu)"
+  fi
+}
+
+check_failed_units() {
+  local failed
+  failed=$(systemctl --failed --no-legend --plain | awk '{print $1}')
+  if [[ -z $failed ]]; then
+    track units ok ""
+  else
+    track units fail "Упавшие systemd-юниты:"$'\n'"${failed}"
+  fi
+}
+
+check_cert() {
+  local days
+  days=$(cert_days)
+  if (( days >= CERT_MIN_DAYS )); then
+    track cert ok ""
+  else
+    track cert fail "SSL-сертификат истекает через ${days} дн., автопродление не сработало"
+  fi
+}
+
+check_backup() {
+  local file age_h
+  file=$(latest_backup)
+  if [[ -z $file ]]; then
+    track backup fail "Бэкапов БД нет в ${BACKUP_DIR}"
+    return
+  fi
+  age_h=$(( ($(date +%s) - $(stat -c %Y "$file")) / 3600 ))
+  if (( age_h <= BACKUP_MAX_AGE_H )); then
+    track backup ok ""
+  else
+    track backup fail "Последний бэкап БД был ${age_h} ч назад"
+  fi
+}
+
+# one-off events: reboot, phoenix restarts, oom kills
+check_events() {
+  local boot_id restarts prev oom
+  boot_id=$(cat /proc/sys/kernel/random/boot_id)
+  prev=$(cat "${STATE_DIR}/boot_id" 2>/dev/null || echo "$boot_id")
+  if [[ $boot_id != "$prev" ]]; then
+    send "[ИНФО] ${DOMAIN}, $(now)"$'\n'"Сервер перезагрузился, uptime: $(uptime -p)"
+  fi
+  echo "$boot_id" >"${STATE_DIR}/boot_id"
+
+  restarts=$(systemctl show phoenix -p NRestarts --value)
+  prev=$(cat "${STATE_DIR}/phoenix_restarts" 2>/dev/null || echo "$restarts")
+  if (( restarts > prev )); then
+    send "[ПРОБЛЕМА] ${DOMAIN}, $(now)"$'\n'"phoenix упал и был перезапущен ($((restarts - prev)) раз)"$'\n'"$(journalctl -u phoenix -n 5 --no-pager -o cat)"
+  fi
+  echo "$restarts" >"${STATE_DIR}/phoenix_restarts"
+
+  oom=$(journalctl -k -q --no-pager --cursor-file="${STATE_DIR}/kernel.cursor" |
+    grep -E "Out of memory|oom-kill" || true)
+  if [[ -n $oom ]]; then
+    send "[ПРОБЛЕМА] ${DOMAIN}, $(now)"$'\n'"Ядро убивало процессы из-за нехватки памяти:"$'\n'"${oom:0:1000}"
+  fi
+}
+
+# best-effort location to tell own logins from foreign ones at a glance
+geo() {
+  curl -s --max-time "$GEO_TIMEOUT" "http://ip-api.com/line/${1}?fields=country,city,isp" |
+    paste -sd ',' - | sed 's/,/, /g'
+}
+
+check_ssh_logins() {
+  local cursor="${STATE_DIR}/ssh.cursor" method user ip
+  # first run: start from the journal end, so old logins are not reported
+  if [[ ! -f $cursor ]]; then
+    journalctl -u ssh -n 1 -q --no-pager --show-cursor | sed -n 's/^-- cursor: //p' >"$cursor"
+    return
+  fi
+  while read -r method user ip; do
+    send "[ВХОД SSH] ${DOMAIN}, $(now)"$'\n'"${user} с ${ip} (${method})"$'\n'"$(geo "$ip")"
+  done < <(journalctl -u ssh -q --no-pager -o cat --cursor-file="$cursor" |
+    grep -oP 'Accepted \K\S+ for \S+ from \S+' | awk '{print $1, $3, $5}')
+}
+
+run_checks() {
+  check_ssh_logins
+  check_services
+  check_db
+  check_site
+  check_resources
+  check_failed_units
+  check_cert
+  check_backup
+  check_events
+}
+
+service_line() {
+  local s out=""
+  for s in "${SERVICES[@]}"; do
+    out+="${s}: $(systemctl is-active "$s")"$'\n'
+  done
+  printf '%s' "$out"
+}
+
+backup_line() {
+  local file
+  file=$(latest_backup)
+  if [[ -z $file ]]; then
+    echo "нет"
+    return
+  fi
+  echo "$(basename "$file"), $(du -h "$file" | cut -f1), копий: $(ls "${BACKUP_DIR}"/pg-*.sql.gz | wc -l)"
+}
+
+ssh_line() {
+  local log failed accepted
+  log=$(journalctl -u ssh --since "7 days ago" -q --no-pager)
+  failed=$(grep -cE "Failed password|Invalid user" <<<"$log")
+  accepted=$(grep -oP "Accepted \S+ for \S+ from \K\S+" <<<"$log" | sort | uniq -c |
+    awk '{printf "%s (%d) ", $2, $1}')
+  echo "неудачных попыток: ${failed}; входы: ${accepted:-нет}"
+}
+
+updates_line() {
+  local all sec reboot=нет
+  all=$(apt-get -s upgrade 2>/dev/null | grep -c '^Inst')
+  sec=$(apt-get -s upgrade 2>/dev/null | grep '^Inst' | grep -ci security)
+  [[ -f /var/run/reboot-required ]] && reboot=да
+  echo "${all} пакетов (security: ${sec}), нужна перезагрузка: ${reboot}"
+}
+
+report() {
+  local mem_total mem_avail
+  mem_total=$(free -m | awk '/Mem:/{print $2}')
+  mem_avail=$(mem_avail_mb)
+  send "Недельный отчёт ${DOMAIN}, $(now)
+
+Аптайм: $(uptime -p)
+Нагрузка 1/5/15: $(cut -d' ' -f1-3 /proc/loadavg)
+Память: доступно ${mem_avail} из ${mem_total} МБ, swap занят $(free -m | awk '/Swap:/{print $3}') МБ
+Диск /: $(df -h --output=used,size,pcent / | tail -1 | awk '{print $1" из "$2" ("$3")"}')
+
+Сервисы:
+$(service_line)
+Сайт: HTTP $(site_code)
+БД ${DB_NAME}: $(pg_isready -h 127.0.0.1 -p 5432 -d "$DB_NAME" -t 10 >/dev/null && echo доступна || echo НЕДОСТУПНА)
+phoenix перезапусков с загрузки: $(systemctl show phoenix -p NRestarts --value)
+SSL: осталось $(cert_days) дн.
+Бэкап: $(backup_line)
+
+SSH за неделю: $(ssh_line)
+Обновления: $(updates_line)
+Журналы: $(journalctl --disk-usage | grep -oP '[0-9.]+[KMG]')
+
+Топ по памяти:
+$(top_mem)"
+}
+
+mkdir -p "$STATE_DIR"
+case "${1:-}" in
+  check) run_checks ;;
+  report) report ;;
+  test) send "Мониторинг ${DOMAIN} подключён, $(now)" ;;
+  *) echo "usage: $0 check|report|test" >&2; exit 2 ;;
+esac

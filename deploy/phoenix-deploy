@@ -70,9 +70,19 @@ version_at() {
   curl -fsS -m "$CURL_TIMEOUT" "$1/healthz" 2>/dev/null | jq -r .version 2>/dev/null
 }
 
+crashed() {
+  [[ $(systemctl show phoenix -p NRestarts --value) -gt 0 ||
+    $(systemctl show phoenix -p ActiveState --value) == failed ]]
+}
+
 serves_version() {
   local i
   for ((i = 0; i < HEALTH_ATTEMPTS; i++)); do
+    # a crash loop won't heal by itself, so roll back now instead of keeping the site down
+    if crashed; then
+      log "new release crashed on start"
+      return 1
+    fi
     if [[ $(version_at "$LOCAL_URL") == "$SHA" && $(version_at "$SITE_URL") == "$SHA" ]] &&
       curl -fsS -m "$CURL_TIMEOUT" -o /dev/null "${SITE_URL}/" &&
       curl -fsS -m "$CURL_TIMEOUT" -o /dev/null "${LOCAL_URL}/readyz"; then

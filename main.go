@@ -49,10 +49,6 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 	if err != nil {
 		return err
 	}
-	// temporary: fails only under systemd, to check that a broken release is rolled back
-	if getenv("INVOCATION_ID") != "" {
-		return errors.New("rollback check: refusing to start under systemd")
-	}
 	db, err := database.Open(ctx, cfg.DatabaseURL, dbConnectBudget)
 	if err != nil {
 		return err

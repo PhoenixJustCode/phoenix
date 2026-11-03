@@ -96,9 +96,10 @@ prune_releases() {
   local keep_current keep_previous
   keep_current=$(readlink -f "$CURRENT")
   keep_previous=$1
+  # grep exits 1 when nothing is left to prune, which pipefail would turn into a failed deploy
   find "${ROOT}/releases" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' |
     sort -rn | cut -d' ' -f2- |
-    grep -vxF -e "$keep_current" -e "$keep_previous" |
+    { grep -vxF -e "$keep_current" -e "$keep_previous" || true; } |
     tail -n +$((KEEP_RELEASES - 1)) | xargs -r rm -rf
 }
 

@@ -27,7 +27,8 @@ body {
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 100vh;
+  /* min-height: on short screens (landscape phone) the card top was cut off */
+  min-height: 100vh;
 }
 
 .card {

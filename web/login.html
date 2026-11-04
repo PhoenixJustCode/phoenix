@@ -153,6 +153,15 @@
         bottom: -50px;
         left: -50px;
       }
+
+      /* the 380px card plus padding was wider than phone screens and got clipped */
+      @media (max-width: 520px) {
+        .login-card {
+          box-sizing: border-box;
+          width: calc(100vw - 2rem);
+          padding: 2rem 1.5rem;
+        }
+      }
     </style>
   </head>
   <body>

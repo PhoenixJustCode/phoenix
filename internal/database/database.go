@@ -34,6 +34,9 @@ const (
 	classConnection        = "08"
 )
 
+// arbitrary app-wide key for pg_advisory_xact_lock
+const migrationLockID = 7470687
+
 //go:embed migrations/*.sql
 var migrations embed.FS
 
@@ -110,14 +113,27 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("list migrations: %w", err)
 	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migrations: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// CREATE ... IF NOT EXISTS is not safe when two instances start at once
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", migrationLockID); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
 	for _, name := range files {
 		query, err := migrations.ReadFile(name)
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if _, err := db.ExecContext(ctx, string(query)); err != nil {
+		if _, err := tx.ExecContext(ctx, string(query)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migrations: %w", err)
 	}
 	return nil
 }

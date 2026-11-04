@@ -82,6 +82,20 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMigrateConcurrentStarts(t *testing.T) {
+	db, _ := testdb.New(t)
+	const instances = 4
+	errs := make(chan error, instances)
+	for range instances {
+		go func() { errs <- database.Migrate(context.Background(), db) }()
+	}
+	for range instances {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent Migrate() error = %v", err)
+		}
+	}
+}
+
 func TestMigrateReportsDatabaseError(t *testing.T) {
 	db, _ := testdb.New(t)
 	_ = db.Close()

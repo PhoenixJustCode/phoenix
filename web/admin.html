@@ -2,6 +2,7 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" href="icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Dashboard | Visits Control</title>
     <link
@@ -479,6 +480,13 @@
 
       // Refresh every 30s
       setInterval(fetchVisits, 30000);
+
+      // logout is POST only, so another site can't log the admin out with a plain link
+      document.querySelector(".logout-btn").addEventListener("click", async (e) => {
+        e.preventDefault();
+        await fetch("/logout", { method: "POST" });
+        window.location.href = "/track";
+      });
     </script>
   </body>
 </html>

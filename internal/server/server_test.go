@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +48,9 @@ func TestRoutes(t *testing.T) {
 		{"POST", "/track", 204},
 		{"GET", "/api/visits", 401},
 		{"GET", "/login", 404},
-		{"GET", "/logout", 303},
+		{"POST", "/logout", 303},
+		// a GET logout would let any site log the admin out with a link
+		{"GET", "/logout", 404},
 		// nothing outside web.Public may leak
 		{"GET", "/.env", 404},
 		{"GET", "/.git/config", 404},
@@ -70,6 +73,49 @@ func TestRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestStaticCaching(t *testing.T) {
+	srv := newTestServer(t)
+	tests := []struct {
+		path      string
+		wantCache string
+	}{
+		{"/", "no-cache"},
+		{"/image.jpg", assetCacheControl},
+		{"/style/style.css", assetCacheControl},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			srv.Handler.ServeHTTP(w, httptest.NewRequest("GET", tt.path, nil))
+			etag := w.Header().Get("ETag")
+			if w.Code != http.StatusOK || etag == "" || w.Header().Get("Cache-Control") != tt.wantCache {
+				t.Fatalf("got %d etag=%q cache=%q", w.Code, etag, w.Header().Get("Cache-Control"))
+			}
+
+			r := httptest.NewRequest("GET", tt.path, nil)
+			r.Header.Set("If-None-Match", etag)
+			w = httptest.NewRecorder()
+			srv.Handler.ServeHTTP(w, r)
+			if w.Code != http.StatusNotModified {
+				t.Errorf("revalidation status = %d, want 304", w.Code)
+			}
+		})
+	}
+}
+
+func TestMustHashFilesPanicsOnBrokenFS(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("mustHashFiles() did not panic on an unreadable FS")
+		}
+	}()
+	mustHashFiles(brokenFS{})
+}
+
+type brokenFS struct{}
+
+func (brokenFS) Open(string) (fs.File, error) { return nil, fs.ErrPermission }
 
 func TestRunGracefulShutdown(t *testing.T) {
 	srv := newTestServer(t)

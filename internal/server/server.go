@@ -3,10 +3,14 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -21,6 +25,10 @@ const (
 	readTimeout       = 10 * time.Second
 	writeTimeout      = 30 * time.Second
 	idleTimeout       = 60 * time.Second
+
+	indexFile         = "index.html"
+	assetCacheControl = "public, max-age=86400"
+	etagBytes         = 8
 )
 
 // Handlers groups the endpoint handlers the server routes to.
@@ -37,7 +45,7 @@ func New(h Handlers) *http.Server {
 	mux.HandleFunc("GET /readyz", h.Health.Readyz)
 	mux.HandleFunc("/track", h.Visits.Track)
 	mux.HandleFunc("POST /login", h.Auth.Login)
-	mux.HandleFunc("/logout", h.Auth.Logout)
+	mux.HandleFunc("POST /logout", h.Auth.Logout)
 	mux.HandleFunc("GET /api/visits", h.Visits.API)
 	// "GET /" would conflict with method-less routes like /logout, so static checks the method itself
 	mux.Handle("/", static())
@@ -54,6 +62,7 @@ func New(h Handlers) *http.Server {
 // static serves only embedded public files and hides directory listings.
 func static() http.Handler {
 	files := http.FileServerFS(web.Public)
+	etags := mustHashFiles(web.Public)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -64,8 +73,46 @@ func static() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if name == "" {
+			name = indexFile
+		}
+		// embedded files have no mtime, so without an ETag browsers re-download them every visit
+		if tag, ok := etags[name]; ok {
+			w.Header().Set("ETag", tag)
+			w.Header().Set("Cache-Control", cacheControl(name))
+		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// html is revalidated on every visit so a deploy shows up at once; assets may be cached
+func cacheControl(name string) string {
+	if strings.HasSuffix(name, ".html") {
+		return "no-cache"
+	}
+	return assetCacheControl
+}
+
+// mustHashFiles panics only if the embedded FS is unreadable, which is a build defect.
+func mustHashFiles(fsys fs.FS) map[string]string {
+	etags := map[string]string{}
+	err := fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		etags[name] = `"` + hex.EncodeToString(sum[:etagBytes]) + `"`
+		return nil
+	})
+	if err != nil {
+		panic(fmt.Sprintf("hash embedded files: %v", err))
+	}
+	return etags
 }
 
 func securityHeaders(next http.Handler) http.Handler {
